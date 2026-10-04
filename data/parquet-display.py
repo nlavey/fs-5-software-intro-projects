@@ -92,3 +92,52 @@ for state_name, state_mask, color in states:
 	fig.tight_layout()
 
 plt.show()
+
+gps = (
+	df.dropna(subset=["VDM_GPS_Latitude", "VDM_GPS_Longitude"])
+	.sort_values("Time")
+	.reset_index(drop=True)
+)
+gps_time = gps["Time"].to_numpy()
+gps_latitude = gps["VDM_GPS_Latitude"].to_numpy()
+gps_longitude = gps["VDM_GPS_Longitude"].to_numpy()
+gps_speed_mph = gps["VDM_GPS_SPEED"].fillna(0).to_numpy()
+moving_fixes = gps_speed_mph > 1
+first_moving_index = np.flatnonzero(moving_fixes)[0]
+
+latitude_reference = np.deg2rad(gps_latitude[first_moving_index])
+east_m = (gps_longitude - gps_longitude[first_moving_index]) * 111320 * np.cos(latitude_reference)
+north_m = (gps_latitude - gps_latitude[first_moving_index]) * 111320
+distance_from_start_m = np.hypot(east_m, north_m)
+path_distance_m = np.r_[0, np.cumsum(np.hypot(np.diff(east_m), np.diff(north_m)))]
+
+lap_start_time = gps_time[first_moving_index]
+return_indices = np.flatnonzero(
+	moving_fixes
+	& (gps_time >= lap_start_time + 30)
+	& (distance_from_start_m <= 8)
+)
+
+return_clusters = []
+for index in return_indices:
+	if return_clusters and gps_time[index] - gps_time[return_clusters[-1][-1]] <= 5:
+		return_clusters[-1].append(index)
+	else:
+		return_clusters.append([index])
+
+lap_finishes = []
+first_lap_distance_m = None
+last_lap_distance_m = path_distance_m[first_moving_index]
+for cluster in return_clusters:
+	closest_return = min(cluster, key=lambda index: distance_from_start_m[index])
+	distance_since_lap_m = path_distance_m[closest_return] - last_lap_distance_m
+	if first_lap_distance_m is None or distance_since_lap_m >= first_lap_distance_m * 0.75:
+		lap_finishes.append(closest_return)
+		if first_lap_distance_m is None:
+			first_lap_distance_m = distance_since_lap_m
+		last_lap_distance_m = path_distance_m[closest_return]
+
+print(f"\nCompleted laps: {len(lap_finishes)}")
+for lap_number, finish_index in enumerate(lap_finishes, start=1):
+	print(f"  Lap {lap_number}: {lap_start_time:.2f}-{gps_time[finish_index]:.2f} s")
+	lap_start_time = gps_time[finish_index]
