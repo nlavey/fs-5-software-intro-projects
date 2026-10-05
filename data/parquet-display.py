@@ -235,3 +235,110 @@ for lap_number, (start_time, end_time) in enumerate(lap_ranges, start=1):
 	print(f"  Accelerating time: {accelerating_time:.2f} s")
 	print(f"  Coasting time: {coasting_time:.2f} s")
 	print(f"  Peak VDM X-axis acceleration (cross-check): {peak_imu_acceleration:.2f} m/s^2")
+
+speed_values = speed_m_s.to_numpy()
+coastdown_speed_squared = []
+coastdown_acceleration = []
+coastdown_interval_count = 0
+
+for start_time, end_time in lap_ranges:
+	lap_coast_mask = (
+		coasting
+		& (time_s >= start_time)
+		& (time_s <= end_time)
+		& (speed_values >= 5.0)
+	)
+	changes = np.diff(np.r_[False, lap_coast_mask, False].astype(int))
+	starts = np.flatnonzero(changes == 1)
+	ends = np.flatnonzero(changes == -1) - 1
+
+	for start, end in zip(starts, ends):
+		if time_s[end] - time_s[start] < 1.0:
+			continue
+
+		coastdown_interval_count += 1
+		interval_times = time_s[start : end + 1]
+		interval_speeds = speed_values[start : end + 1]
+		delta_time = np.diff(interval_times)
+		valid_pairs = delta_time > 0
+		if not np.any(valid_pairs):
+			continue
+
+		average_speed = (interval_speeds[:-1] + interval_speeds[1:]) / 2
+		coastdown_speed_squared.extend(average_speed[valid_pairs] ** 2)
+		coastdown_acceleration.extend(
+			(np.diff(interval_speeds)[valid_pairs] / delta_time[valid_pairs]).tolist()
+		)
+
+if len(coastdown_acceleration) < 2:
+	raise ValueError(
+		"Not enough clean coast-down samples to fit drag and rolling resistance."
+	)
+
+coastdown_speed_squared = np.asarray(coastdown_speed_squared)
+coastdown_acceleration = np.asarray(coastdown_acceleration)
+drag_slope, rolling_intercept = np.polyfit(
+	coastdown_speed_squared,
+	coastdown_acceleration,
+	1,
+)
+fit_acceleration = drag_slope * coastdown_speed_squared + rolling_intercept
+residual_sum_squares = np.sum((coastdown_acceleration - fit_acceleration) ** 2)
+total_sum_squares = np.sum(
+	(coastdown_acceleration - np.mean(coastdown_acceleration)) ** 2
+)
+r_squared = 1 - residual_sum_squares / total_sum_squares
+
+vehicle_mass_kg = 221.4
+effective_mass_kg = 244.08
+air_density_kg_m3 = 1.225
+drag_factor_n_per_mps2 = -drag_slope * effective_mass_kg
+drag_area_m2 = 2 * drag_factor_n_per_mps2 / air_density_kg_m3
+rolling_resistance_force_n = -rolling_intercept * effective_mass_kg
+rolling_resistance_coefficient = rolling_resistance_force_n / (
+	vehicle_mass_kg * 9.81
+)
+
+print("\nCoast-down fit (all laps, speed >= 5 m/s, intervals >= 1 s):")
+print(f"  Accepted intervals: {coastdown_interval_count}")
+print(f"  Acceleration samples: {len(coastdown_acceleration)}")
+print(
+	"  Fit: dv/dt = "
+	f"{drag_slope:.6f} * v^2 + {rolling_intercept:.6f} m/s^2"
+)
+print(f"  R-squared: {r_squared:.4f}")
+print(
+	f"  Drag factor (0.5 * rho * CdA): "
+	f"{drag_factor_n_per_mps2:.3f} N/(m/s)^2"
+)
+print(f"  CdA: {drag_area_m2:.3f} m^2")
+print(f"  Rolling resistance force: {rolling_resistance_force_n:.2f} N")
+print(f"  Rolling resistance coefficient (Crr): {rolling_resistance_coefficient:.5f}")
+
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.scatter(
+	coastdown_speed_squared,
+	coastdown_acceleration,
+	s=14,
+	alpha=0.55,
+	label="Coast-down samples",
+)
+fit_speed_squared = np.linspace(
+	coastdown_speed_squared.min(),
+	coastdown_speed_squared.max(),
+	100,
+)
+ax.plot(
+	fit_speed_squared,
+	drag_slope * fit_speed_squared + rolling_intercept,
+	color="#c2413b",
+	linewidth=2,
+	label=f"Linear fit ($R^2={r_squared:.3f}$)",
+)
+ax.set_title("Coast-Down Acceleration vs. Speed Squared")
+ax.set_xlabel("Speed squared (m$^2$/s$^2$)")
+ax.set_ylabel("Acceleration (m/s$^2$)")
+ax.grid(True, alpha=0.3)
+ax.legend()
+fig.tight_layout()
+plt.show()
