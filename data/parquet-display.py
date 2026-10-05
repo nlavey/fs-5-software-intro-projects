@@ -138,6 +138,100 @@ for cluster in return_clusters:
 		last_lap_distance_m = path_distance_m[closest_return]
 
 print(f"\nCompleted laps: {len(lap_finishes)}")
-for lap_number, finish_index in enumerate(lap_finishes, start=1):
-	print(f"  Lap {lap_number}: {lap_start_time:.2f}-{gps_time[finish_index]:.2f} s")
-	lap_start_time = gps_time[finish_index]
+lap_ranges = list(zip(
+	[gps_time[first_moving_index]] + [gps_time[index] for index in lap_finishes[:-1]],
+	[gps_time[index] for index in lap_finishes],
+))
+for lap_number, (start_time, end_time) in enumerate(lap_ranges, start=1):
+	print(f"  Lap {lap_number}: {start_time:.2f}-{end_time:.2f} s")
+
+fig, ax = plt.subplots(figsize=(9, 7))
+ax.plot(
+	east_m,
+	north_m,
+	color="#cbd5e1",
+	linewidth=1,
+	label="Full GPS track",
+)
+lap_colors = plt.get_cmap("tab10")
+for lap_number, (start_time, end_time) in enumerate(lap_ranges, start=1):
+	lap_gps_mask = (gps_time >= start_time) & (gps_time <= end_time)
+	lap_color = lap_colors((lap_number - 1) % 10)
+	ax.plot(
+		east_m[lap_gps_mask],
+		north_m[lap_gps_mask],
+		color=lap_color,
+		linewidth=2,
+		label=f"Lap {lap_number}: {end_time - start_time:.2f} s",
+	)
+	start_index = np.argmin(np.abs(gps_time - start_time))
+	finish_index = lap_finishes[lap_number - 1]
+	ax.scatter(
+		east_m[start_index],
+		north_m[start_index],
+		color=lap_color,
+		marker="o",
+		s=45,
+		zorder=3,
+		label="Lap start" if lap_number == 1 else None,
+	)
+	ax.scatter(
+		east_m[finish_index],
+		north_m[finish_index],
+		color=lap_color,
+		marker="X",
+		s=55,
+		zorder=3,
+		label="Lap finish" if lap_number == 1 else None,
+	)
+	ax.annotate(
+		str(lap_number),
+		(east_m[start_index], north_m[start_index]),
+		xytext=(5, 5),
+		textcoords="offset points",
+		color=lap_color,
+		fontweight="bold",
+	)
+
+ax.set_title("GPS Track by Lap")
+ax.set_xlabel("East from lap start (m)")
+ax.set_ylabel("North from lap start (m)")
+ax.set_aspect("equal", adjustable="datalim")
+ax.grid(True, alpha=0.3)
+ax.legend()
+fig.tight_layout()
+plt.show()
+
+sample_end_time = np.r_[time_s[1:], time_s[-1]]
+for lap_number, (start_time, end_time) in enumerate(lap_ranges, start=1):
+	lap_mask = (time_s < end_time) & (sample_end_time > start_time)
+	lap_duration_per_sample = np.maximum(
+		0,
+		np.minimum(sample_end_time, end_time) - np.maximum(time_s, start_time),
+	)
+	peak_speed_index = np.flatnonzero(lap_mask)[np.argmax(speed_m_s.to_numpy()[lap_mask])]
+	peak_speed = speed_m_s.iloc[peak_speed_index]
+
+	acceleration_window_s = 1.0
+	window_start_times = time_s[(time_s >= start_time) & (time_s + acceleration_window_s <= end_time)]
+	window_start_speeds = np.interp(window_start_times, time_s, speed_m_s)
+	window_end_speeds = np.interp(window_start_times + acceleration_window_s, time_s, speed_m_s)
+	average_acceleration = (window_end_speeds - window_start_speeds) / acceleration_window_s
+	peak_acceleration_index = np.argmax(average_acceleration)
+	peak_acceleration = average_acceleration[peak_acceleration_index]
+	peak_acceleration_time = window_start_times[peak_acceleration_index]
+
+	accelerating_time = np.sum(lap_duration_per_sample * accelerating)
+	coasting_time = np.sum(lap_duration_per_sample * coasting)
+	imu_acceleration = df_filled["VDM_X_AXIS_ACCELERATION"].to_numpy() * 9.81
+	peak_imu_acceleration = np.max(imu_acceleration[lap_mask])
+
+	print(f"\nLap {lap_number} metrics:")
+	print(f"  Maximum speed: {peak_speed:.2f} m/s ({peak_speed * 3.6:.2f} km/h)")
+	print(
+		f"  Maximum 1-second average acceleration: {peak_acceleration:.2f} m/s^2 "
+		f"(starting at {peak_acceleration_time:.2f} s)"
+	)
+	print(f"  Accelerating time: {accelerating_time:.2f} s")
+	print(f"  Coasting time: {coasting_time:.2f} s")
+	print(f"  Peak VDM X-axis acceleration (cross-check): {peak_imu_acceleration:.2f} m/s^2")
